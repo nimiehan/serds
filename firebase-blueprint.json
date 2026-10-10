@@ -58,6 +58,23 @@
       },
       "required": ["code", "type", "priority", "location", "status"]
     },
+    "Responder": {
+      "title": "Responder",
+      "description": "Live status, location, apparatus, and presence of emergency field responder units.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "callSign": { "type": "string", "maxLength": 100 },
+        "apparatus": { "type": "string", "enum": ["ambulance", "police", "fire"] },
+        "status": { "type": "string", "enum": ["waiting", "en_route", "on_scene", "transporting", "offline", "incoming"] },
+        "coords": { "type": "array" },
+        "accuracy": { "type": "number" },
+        "phone": { "type": "string", "maxLength": 30 },
+        "lastSeen": { "type": "number" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "callSign", "apparatus", "status"]
+    },
     "SafetyBroadcast": {
       "title": "SafetyBroadcast",
       "description": "Safety check-in broadcast sent to emergency contacts.",
@@ -92,6 +109,10 @@
     "/incidents/{incidentId}": {
       "schema": "Incident",
       "description": "CAD incident entries created during emergency alerts or SOS dispatches."
+    },
+    "/responders/{responderId}": {
+      "schema": "Responder",
+      "description": "Real-time presence and GPS telemetry for active emergency responders."
     },
     "/safetyBroadcasts/{broadcastId}": {
       "schema": "SafetyBroadcast",

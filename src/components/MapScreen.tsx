@@ -35,6 +35,10 @@ import {
 } from '../lib/api';
 import { useUserSettings } from '../lib/userSettings';
 import { useAuth } from '../contexts/AuthContext';
+import { 
+  subscribeToOnlineResponders, 
+  subscribeToIncidentStatus 
+} from '../lib/firebase';
 
 export type EmergencyServiceType = 'police' | 'ambulance' | 'fire';
 
@@ -269,37 +273,73 @@ export default function MapScreen({ autoDispatch, initialIncidentId, onBack, onC
     requestLocation();
   }, []);
 
-  // 2. Fetch and Subscribe to Real Online Responders
+  // 2. Fetch and Subscribe to Real Online Responders (Multi-Device via Firestore + Socket + REST)
   useEffect(() => {
     let isSubscribed = true;
 
-    const mergeWithLocal = (incoming: LiveOnlineResponder[]) => {
-      const combined = [...incoming];
+    const mergeRespondersList = (baseList: LiveOnlineResponder[]) => {
+      const combinedMap = new Map<string, LiveOnlineResponder>();
+      baseList.forEach(r => {
+        if (r && r.id && r.status !== 'offline') combinedMap.set(r.id, r);
+      });
+
       try {
         const localCached = localStorage.getItem('serd_latest_online_responder');
         if (localCached) {
           const parsed = JSON.parse(localCached);
           if (parsed && parsed.id && parsed.status !== 'offline') {
             const age = Date.now() - (parsed.timestamp || 0);
-            if (age < 600000) { // 10 minutes valid
-              const existingIdx = combined.findIndex(r => r.id === parsed.id);
-              if (existingIdx >= 0) {
-                // Keep freshest data
-                combined[existingIdx] = { ...combined[existingIdx], ...parsed };
-              } else {
-                combined.push(parsed);
-              }
+            if (age < 600000) {
+              combinedMap.set(parsed.id, { ...(combinedMap.get(parsed.id) || {}), ...parsed });
             }
           }
         }
       } catch {}
-      return combined;
+
+      return Array.from(combinedMap.values());
     };
 
+    // 1. Real-time Firestore Cloud Subscription (Works across all devices & browsers)
+    const unsubscribeFirestore = subscribeToOnlineResponders((firestoreFleet) => {
+      if (isSubscribed && firestoreFleet) {
+        setOnlineResponders(prev => {
+          const merged = new Map<string, LiveOnlineResponder>();
+          prev.forEach(r => {
+            if (r.status !== 'offline') merged.set(r.id, r);
+          });
+          firestoreFleet.forEach(r => {
+            if (r.status === 'offline') {
+              merged.delete(r.id);
+            } else {
+              merged.set(r.id, {
+                id: r.id,
+                callSign: r.callSign,
+                apparatus: r.apparatus,
+                status: r.status as any,
+                coords: r.coords,
+                accuracy: r.accuracy,
+                phone: r.phone,
+                lastSeen: r.lastSeen
+              });
+            }
+          });
+          return mergeRespondersList(Array.from(merged.values()));
+        });
+      }
+    });
+
+    // 2. HTTP Fallback Polling
     const fetchFleet = () => {
       fetchOnlineResponders(citizenLocation || undefined).then(list => {
         if (isSubscribed && list) {
-          setOnlineResponders(mergeWithLocal(list));
+          setOnlineResponders(prev => {
+            const map = new Map<string, LiveOnlineResponder>();
+            prev.forEach(r => map.set(r.id, r));
+            list.forEach(r => {
+              if (r.status !== 'offline') map.set(r.id, r);
+            });
+            return mergeRespondersList(Array.from(map.values()));
+          });
         }
       });
     };
@@ -316,15 +356,24 @@ export default function MapScreen({ autoDispatch, initialIncidentId, onBack, onC
     document.addEventListener('visibilitychange', handleFocusOrVisibility);
     window.addEventListener('focus', handleFocusOrVisibility);
 
+    // 3. Socket.io Real-time Push
     const socket = io();
     socket.on('responders-sync', (fleet: LiveOnlineResponder[]) => {
       if (isSubscribed && fleet) {
-        setOnlineResponders(mergeWithLocal(fleet));
+        setOnlineResponders(prev => {
+          const map = new Map<string, LiveOnlineResponder>();
+          prev.forEach(r => map.set(r.id, r));
+          fleet.forEach(r => {
+            if (r.status !== 'offline') map.set(r.id, r);
+          });
+          return mergeRespondersList(Array.from(map.values()));
+        });
       }
     });
 
     return () => {
       isSubscribed = false;
+      unsubscribeFirestore();
       clearInterval(interval);
       document.removeEventListener('visibilitychange', handleFocusOrVisibility);
       window.removeEventListener('focus', handleFocusOrVisibility);
@@ -451,6 +500,45 @@ export default function MapScreen({ autoDispatch, initialIncidentId, onBack, onC
       if (list && list.length > 0) setMessages(list);
     });
 
+    // Real-time Firestore Incident Lifecycle Subscription (Cross-device sync)
+    const unsubscribeIncident = subscribeToIncidentStatus(activeIncidentId, (inc) => {
+      if (inc && inc.status) {
+        setIncidentStatus(inc.status);
+        if (inc.status === 'en_route') {
+          playChime(784, 1046.5);
+          const assignedResp: LiveOnlineResponder = {
+            id: inc.targetResponderId || inc.acceptedUnit || 'responder',
+            callSign: inc.acceptedUnit || inc.recommendedUnit || 'Assigned Unit',
+            apparatus: (inc.service as any) || 'ambulance',
+            coords: (inc.coords as [number, number]) || [14.5995, 120.9842],
+            status: 'en_route'
+          };
+          setDispatchedResponder(assignedResp);
+          setSelectedResponder(assignedResp);
+          if (assignedResp.coords && citizenLocation) {
+            calculateRealRoute(assignedResp.coords, citizenLocation)
+              .then(res => {
+                setRouteResult(res);
+                setRoutePoints(res.coordinates);
+              })
+              .catch(() => {});
+          }
+          setDispatchStatusToast({
+            type: 'accepted',
+            message: `Unit ${assignedResp.callSign} Accepted!`,
+            subtext: 'The emergency unit has responded to your call and is en route to your location.'
+          });
+          setTimeout(() => setDispatchStatusToast(null), 7000);
+        } else if (inc.status === 'cancelled' || inc.status === 'completed') {
+          setIsDispatched(false);
+          setActiveIncidentId(null);
+          setDispatchedResponder(null);
+          setRouteResult(null);
+          setRoutePoints([]);
+        }
+      }
+    });
+
     const socket = io();
 
     // Unit accepted dispatch
@@ -549,6 +637,7 @@ export default function MapScreen({ autoDispatch, initialIncidentId, onBack, onC
     });
 
     return () => {
+      unsubscribeIncident();
       socket.disconnect();
     };
   }, [activeIncidentId, citizenLocation]);

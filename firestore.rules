@@ -92,6 +92,25 @@ service cloud.firestore {
       allow delete: if isValidId(incidentId) && isAdmin();
     }
 
+    // Responder Entity Validation Blueprint
+    function isValidResponder(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.callSign is string && data.callSign.size() <= 100 &&
+             data.apparatus in ['ambulance', 'police', 'fire'] &&
+             data.status in ['waiting', 'en_route', 'on_scene', 'transporting', 'offline', 'incoming'] &&
+             (!('coords' in data) || (data.coords is list && data.coords.size() <= 10)) &&
+             (!('phone' in data) || (data.phone is string && data.phone.size() <= 30)) &&
+             (!('accuracy' in data) || data.accuracy is number) &&
+             (!('lastSeen' in data) || data.lastSeen is number);
+    }
+
+    // Active Responders Telemetry Collection
+    match /responders/{responderId} {
+      allow get, list: if true;
+      allow create, update: if isValidId(responderId) && isSignedIn() && isValidResponder(incoming());
+      allow delete: if isValidId(responderId) && (isAdmin() || (isSignedIn() && request.auth.uid == responderId));
+    }
+
     // Safety Broadcasts Collection
     function isValidSafetyBroadcast(data) {
       return data.callerName is string && data.callerName.size() <= 100 &&

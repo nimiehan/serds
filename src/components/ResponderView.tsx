@@ -38,6 +38,7 @@ import { useUserSettings } from '../lib/userSettings';
 import { 
   subscribeToIncidents, 
   updateFirestoreIncidentStatus, 
+  syncResponderPresenceToFirestore,
   FirestoreIncident 
 } from '../lib/firebase';
 import { 
@@ -177,6 +178,15 @@ export default function ResponderView({ onBack }: ResponderViewProps) {
   const { settings } = useUserSettings();
 
   const handleLogout = async () => {
+    const responderId = userProfile?.uid || latestPresenceRef.current?.id;
+    if (responderId) {
+      syncResponderPresenceToFirestore({
+        id: responderId,
+        callSign: callSign || 'Unit',
+        apparatus,
+        status: 'offline'
+      } as any).catch(() => {});
+    }
     await logout();
     onBack();
   };
@@ -534,6 +544,12 @@ export default function ResponderView({ onBack }: ResponderViewProps) {
       }));
     } catch {}
 
+    // 1. Instant Firestore Sync (Real-time Cloud Sync for All Devices)
+    syncResponderPresenceToFirestore(payload as any).catch((err) => {
+      console.warn('[Firestore] Responder presence sync notice:', err);
+    });
+
+    // 2. Socket.io & REST fallback
     if (socketRef.current?.connected) {
       socketRef.current.emit('responder-presence', payload);
     }
@@ -564,6 +580,16 @@ export default function ResponderView({ onBack }: ResponderViewProps) {
       clearInterval(timer);
       document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
       window.removeEventListener('focus', handleVisibilityOrFocus);
+
+      const responderId = userProfile?.uid || latestPresenceRef.current?.id;
+      if (responderId) {
+        syncResponderPresenceToFirestore({
+          id: responderId,
+          callSign: callSign || 'Unit',
+          apparatus,
+          status: 'offline'
+        } as any).catch(() => {});
+      }
     };
   }, []);
 

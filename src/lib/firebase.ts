@@ -526,6 +526,136 @@ export function subscribeToAllergiesCatalog(callback: (allergies: string[]) => v
   }
 }
 
+export interface FirestoreResponder {
+  id: string;
+  socketId?: string;
+  callSign: string;
+  apparatus: 'ambulance' | 'police' | 'fire';
+  status: 'waiting' | 'en_route' | 'on_scene' | 'transporting' | 'offline' | 'incoming';
+  coords: [number, number];
+  accuracy?: number;
+  phone?: string;
+  updatedAt?: any;
+  lastSeen?: number;
+}
+
+/**
+ * Sync responder presence and location directly to Firestore for global cross-device synchronization
+ */
+export async function syncResponderPresenceToFirestore(
+  responder: Partial<FirestoreResponder> & { id: string; callSign: string; apparatus: string }
+): Promise<boolean> {
+  const path = `responders/${responder.id}`;
+  try {
+    const ref = doc(db, "responders", responder.id);
+    const sanitized = cleanFirestoreData({
+      id: responder.id,
+      callSign: responder.callSign,
+      apparatus: responder.apparatus,
+      status: responder.status || 'waiting',
+      coords: Array.isArray(responder.coords) && responder.coords.length === 2 && !isNaN(responder.coords[0]) && !isNaN(responder.coords[1])
+        ? [responder.coords[0], responder.coords[1]]
+        : [14.5995, 120.9842],
+      accuracy: typeof responder.accuracy === 'number' ? responder.accuracy : 10,
+      phone: responder.phone || '',
+      updatedAt: serverTimestamp(),
+      lastSeen: Date.now()
+    });
+    await setDoc(ref, sanitized, { merge: true });
+    return true;
+  } catch (err: any) {
+    console.warn("[Firestore] Failed to sync responder presence to Firestore:", err?.message || err);
+    return false;
+  }
+}
+
+/**
+ * Real-time subscription to active online responders across all devices
+ */
+export function subscribeToOnlineResponders(
+  callback: (responders: FirestoreResponder[]) => void
+): () => void {
+  const path = "responders";
+  try {
+    const colRef = collection(db, path);
+    return onSnapshot(colRef, (snapshot) => {
+      const now = Date.now();
+      const list: FirestoreResponder[] = [];
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data();
+        const lastSeen = data.lastSeen || 0;
+        const isRecent = (now - lastSeen) <= 900000; // 15 mins
+        if (data.status !== 'offline' && isRecent) {
+          list.push({
+            id: docSnap.id,
+            callSign: data.callSign || 'Unit',
+            apparatus: data.apparatus || 'ambulance',
+            status: data.status || 'waiting',
+            coords: Array.isArray(data.coords) && data.coords.length === 2 && !isNaN(data.coords[0]) && !isNaN(data.coords[1])
+              ? [data.coords[0], data.coords[1]]
+              : [14.5995, 120.9842],
+            accuracy: typeof data.accuracy === 'number' ? data.accuracy : 10,
+            phone: data.phone || '',
+            lastSeen: data.lastSeen
+          });
+        }
+      });
+      callback(list);
+    }, (error) => {
+      console.warn("[Firestore] Responders subscription error:", error.message);
+      handleFirestoreError(error, OperationType.GET, path);
+    });
+  } catch (err) {
+    console.warn("[Firestore] Error initiating responders subscription:", err);
+    return () => {};
+  }
+}
+
+/**
+ * Real-time subscription to a specific incident document in Firestore
+ */
+export function subscribeToIncidentStatus(
+  incidentId: string,
+  callback: (incident: FirestoreIncident | null) => void
+): () => void {
+  const path = `incidents/${incidentId}`;
+  try {
+    const ref = doc(db, "incidents", incidentId);
+    return onSnapshot(ref, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        callback({
+          id: snap.id,
+          code: data.code || '10-79',
+          type: data.type || 'Emergency',
+          priority: data.priority || 'critical',
+          location: data.location || 'Location',
+          reportedTime: data.reportedTime || '',
+          patientName: data.patientName || '',
+          recommendedUnit: data.recommendedUnit,
+          service: data.service,
+          targetResponderId: data.targetResponderId,
+          acceptedUnit: data.acceptedUnit,
+          declinedBy: Array.isArray(data.declinedBy) ? data.declinedBy : [],
+          distanceKm: data.distanceKm || 0,
+          etaMins: data.etaMins || 0,
+          routeAlgorithm: data.routeAlgorithm || '',
+          status: data.status || 'dispatched',
+          coords: data.coords || [0, 0],
+          details: data.details || '',
+          createdAt: data.createdAt
+        });
+      } else {
+        callback(null);
+      }
+    }, (err) => {
+      console.warn("[Firestore] Incident status subscription error:", err);
+    });
+  } catch {
+    return () => {};
+  }
+}
+
 export {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
@@ -534,3 +664,4 @@ export {
   signInAnonymously
 };
 export type { User };
+
